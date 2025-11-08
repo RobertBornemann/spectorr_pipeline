@@ -1,0 +1,61 @@
+# --- Python / Poetry
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# type checking / tests / coverage
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache/
+
+# editors / OS
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# notebooks
+.ipynb_checkpoints/
+
+# env & secrets
+.env
+.env.*
+*.env
+*.secret
+*.secrets
+*.key
+*.pem
+
+# logs & local runs
+*.log
+logs/
+tmp/
+scratch/
+
+# project-specific (Spectorr)
+# (generated locally by your pipeline; keep data outside the repo, but ignore just in case)
+spectorr-data/
+data/
+**/curated/
+**/raw/
+**/staging/
+
+# Terraform (only for spectorr-infra; safe to include everywhere)
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+terraform.rc
