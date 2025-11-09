@@ -14,8 +14,8 @@ from .llm.anthropic_adapter import ClaudeAdapter
 load_dotenv()
 
 
-def run(asset_id: str | None = None, date: str | None = None) -> List[Dict[str, Any]]:
-    df = load_cleaned()
+def run(asset_id: str | None = None, date: str | None = None, run_id: str | None = None):
+    df = load_cleaned(run_id)
     if asset_id:
         df = df[df["asset_id"] == asset_id]
     if date:
@@ -35,7 +35,7 @@ def run(asset_id: str | None = None, date: str | None = None) -> List[Dict[str, 
         )
         results.append(rec)
 
-    write_insights(results)
+    write_insights(results, run_id)
     return results
 
 

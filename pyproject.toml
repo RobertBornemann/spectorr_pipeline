@@ -16,9 +16,6 @@ pydantic = "^2.12.4"
 pydantic-settings = "^2.11.0"
 python-dotenv = "^1.2.1"
 
-[tool.poetry.scripts]
-spectorr-pipeline = "spectorr_pipeline.cli:app"
-
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 black = "^24.0.0"

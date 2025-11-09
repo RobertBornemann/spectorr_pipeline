@@ -1,103 +1,136 @@
+# src/spectorr_pipeline/etl.py
 from __future__ import annotations
 
-import datetime as dt
 import os
-import re
 from pathlib import Path
-from typing import Iterable, List
+from typing import List
 
 import pandas as pd
 
-# Tiny lexicon for a first-pass score
-LEXICON = {
-    "good": 1.0,
-    "great": 1.5,
-    "positive": 0.8,
-    "bullish": 1.2,
-    "up": 0.4,
-    "bad": -1.0,
-    "poor": -1.2,
-    "negative": -0.8,
-    "bearish": -1.2,
-    "down": -0.4,
-}
+from .io.paths import curated_cleaned_csv, raw_dir
 
-COLUMNS = ["asset_id", "text", "source_date"]
+REQUIRED_COLS = ["asset_id", "text", "source_date", "sentiment_score"]
 
 
-def _clean_text(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return s
+def _find_raw_files() -> List[Path]:
+    """Return all *.csv files under raw/ (non-recursive)."""
+    rdir = raw_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+    return sorted(rdir.glob("*.csv"))
 
 
-def _simple_sentiment(text: str) -> float:
-    words = re.findall(r"[a-z]+", text.lower())
-    return float(sum(LEXICON.get(w, 0.0) for w in words))
+def _read_concat(files: List[Path]) -> pd.DataFrame:
+    """Read and concatenate raw CSV files."""
+    frames = []
+    for f in files:
+        df = pd.read_csv(f)
+        frames.append(df)
+    if not frames:
+        raise RuntimeError(f"No raw CSV files found in {raw_dir()}")
+    df = pd.concat(frames, ignore_index=True)
+    return df
 
 
-def _infer_asset_from_filename(p: Path) -> str | None:
-    # e.g., note_0001_AAPL.txt -> AAPL
-    m = re.search(r"_([A-Z]{2,6})\.", p.name)
-    return m.group(1) if m else None
+def _clean(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize schema & types:
+
+    - Keep only required columns
+    - Coerce types (date, float)
+    - Drop empty text / invalid rows
+    - Clip sentiment_score to [-1, 1]
+    - Ensure ISO date string (YYYY-MM-DD)
+    """
+    # Missing columns?
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in raw data: {missing}")
+
+    df = df[REQUIRED_COLS].copy()
+
+    # Basic sanitization
+    df["asset_id"] = df["asset_id"].astype(str).str.strip()
+    df["text"] = df["text"].astype(str).str.strip()
+
+    # Dates: to datetime (coerce), then to date
+    df["source_date"] = pd.to_datetime(df["source_date"], errors="coerce").dt.date
+
+    # Sentiment: numeric, then clip
+    df["sentiment_score"] = pd.to_numeric(df["sentiment_score"], errors="coerce")
+    df["sentiment_score"] = df["sentiment_score"].clip(lower=-1.0, upper=1.0)
+
+    # Drop bad rows
+    df = df.dropna(subset=["asset_id", "text", "source_date", "sentiment_score"])
+    df = df[df["asset_id"] != ""]
+    df = df[df["text"] != ""]
+
+    # Write as ISO date strings (reader will parse back to date)
+    df["source_date"] = df["source_date"].astype(str)
+
+    # Optional row cap for demos (set SPECTORR_ETL_MAX_ROWS=1000)
+    cap = os.getenv("SPECTORR_ETL_MAX_ROWS")
+    if cap:
+        try:
+            n = int(cap)
+            if n > 0:
+                df = df.head(n)
+        except Exception:
+            pass
+
+    # Final column order
+    df = df[REQUIRED_COLS]
+    return df
 
 
-def extract(sources: Iterable[str]) -> pd.DataFrame:
-    """Read CSVs from raw/ (e.g., feedback.csv) and .txt from raw/analyst_notes/."""
-    rows: List[pd.DataFrame] = []
+def run_etl() -> Path:
+    """Main ETL entry: raw/*.csv -> curated/cleaned.csv"""
+    print(f"[ETL] raw dir: {raw_dir()}", flush=True)
+    files = _find_raw_files()
+    if not files:
+        raise RuntimeError(f"No raw CSV files found in {raw_dir()}")
 
-    # CSVs (must have asset_id,text,source_date)
-    for src in sorted(s for s in sources if s.endswith(".csv")):
-        df = pd.read_csv(src)
-        missing = [c for c in COLUMNS if c not in df.columns]
-        if missing:
-            raise ValueError(f"{src} missing columns: {missing}")
-        rows.append(df[COLUMNS])
+    print(f"[ETL] found {len(files)} raw file(s)", flush=True)
+    df_raw = _read_concat(files)
+    print(f"[ETL] concatenated rows: {len(df_raw)}", flush=True)
 
-    # analyst_notes/*.txt → build rows with inferred asset_id and today’s date
-    txt_dir = (
-        Path(os.getenv("SPECTORR_DATA", "~/Documents/Projects/spectorr/spectorr-data")).expanduser()
-        / "raw"
-        / "analyst_notes"
-    )
-    if txt_dir.exists():
-        for p in txt_dir.glob("*.txt"):
-            asset = _infer_asset_from_filename(p) or "UNKNOWN"
-            rows.append(
-                pd.DataFrame(
-                    [
-                        {
-                            "asset_id": asset,
-                            "text": p.read_text(),
-                            "source_date": dt.date.today().isoformat(),
-                        }
-                    ]
-                )
-            )
+    df = _clean(df_raw)
+    print(f"[ETL] cleaned rows: {len(df)}", flush=True)
 
-    if not rows:
-        return pd.DataFrame(columns=COLUMNS)
-
-    return pd.concat(rows, ignore_index=True)
-
-
-def transform(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=COLUMNS + ["sentiment_score"])
-    out = df.copy()
-    out["text"] = out["text"].fillna("").map(_clean_text)
-    out["sentiment_score"] = out["text"].map(_simple_sentiment)
-    # basic sanity: keep only needed columns
-    out = out[["asset_id", "text", "source_date", "sentiment_score"]]
+    out = curated_cleaned_csv()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out, index=False)
+    print(f"[ETL] wrote {out}", flush=True)
     return out
 
 
-def load(
-    df: pd.DataFrame, out_dir: str | Path = "~/Documents/Projects/spectorr/spectorr-data/curated"
-) -> Path:
-    out_path = Path(out_dir).expanduser()
-    out_path.mkdir(parents=True, exist_ok=True)
-    target = out_path / "cleaned.csv"
-    # Always write header; overwrite for determinism
-    df.to_csv(target, index=False)
-    return target  # <-- IMPORTANT: return a Path
+def main():
+    try:
+        run_etl()
+    except Exception as e:
+        # Make sure errors are visible in SSE/subprocess logs
+        print(f"[ETL][ERROR] {type(e).__name__}: {e}", flush=True)
+        raise
+
+
+if __name__ == "__main__":
+    main()
+
+
+# --- Compatibility shims for older CLI/tests ---------------------------------
+def extract():
+    """Old name: read raw/*.csv into a single DataFrame."""
+    files = _find_raw_files()
+    return _read_concat(files)
+
+
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    """Old name: clean/normalize the dataframe."""
+    return _clean(df)
+
+
+def load(df: pd.DataFrame) -> Path:
+    """Old name: write curated/cleaned.csv."""
+    out = curated_cleaned_csv()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out, index=False)
+    return out
